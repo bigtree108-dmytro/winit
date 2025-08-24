@@ -39,3 +39,7 @@ The migration guide could reference other migration examples in the current
 changelog entry.
 
 ## Unreleased
+
+### Fixed
+
+- On Windows 11, prevent incorrect shifting when dragging window onto a monitor with different DPI.
