@@ -21,7 +21,7 @@ use windows_sys::Win32::Foundation::{
     GetLastError, FALSE, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_FAILED, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, RedrawWindow, ScreenToClient,
+    GetMonitorInfoW, MonitorFromRect, RedrawWindow, ScreenToClient,
     ValidateRect, MONITORINFO, MONITOR_DEFAULTTONULL, RDW_INTERNALPAINT, SC_SCREENSAVE,
 };
 use windows_sys::Win32::System::Ole::RevokeDragDrop;
@@ -2346,7 +2346,13 @@ unsafe fn public_window_callback_inner(
 
                 // Check to see if the new window rect is on the monitor with the new DPI factor.
                 // If it isn't, offset the window so that it is.
-                let new_dpi_monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONULL) };
+                //
+                // The monitor with the new DPI factor is the one the suggested rect lands on, not
+                // the one the window is still mostly on: while a window is being dragged across a
+                // boundary, `MonitorFromWindow` answers with the monitor it is leaving, the window
+                // is nudged back onto it, and the next `WM_DPICHANGED` scales the size again. A
+                // few crossings of the boundary and the window is larger than the desktop.
+                let new_dpi_monitor = unsafe { MonitorFromRect(&suggested_rect, MONITOR_DEFAULTTONULL) };
                 let conservative_rect_monitor =
                     unsafe { MonitorFromRect(&conservative_rect, MONITOR_DEFAULTTONULL) };
                 new_outer_rect = if conservative_rect_monitor == new_dpi_monitor {
