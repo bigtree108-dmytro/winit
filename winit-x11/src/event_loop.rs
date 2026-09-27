@@ -406,6 +406,7 @@ impl EventLoop {
             active_window: None,
             modifiers: Default::default(),
             is_composing: false,
+            invalidated: Default::default(),
         };
 
         // Register for device hotplug events
@@ -628,6 +629,14 @@ impl EventLoop {
             }
 
             for window_id in windows {
+                let rects = self.event_processor.invalidated.borrow_mut().remove(&window_id);
+                if let Some(rects) = rects {
+                    app.window_event(
+                        &self.event_processor.target,
+                        window_id,
+                        WindowEvent::SurfaceInvalidated { rects },
+                    );
+                }
                 app.window_event(
                     &self.event_processor.target,
                     window_id,

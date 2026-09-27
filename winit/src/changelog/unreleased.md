@@ -40,6 +40,11 @@ changelog entry.
 
 ## Unreleased
 
+### Added
+
+- Add `WindowEvent::SurfaceInvalidated`, naming the parts of the surface the system discarded
+  right before the `RedrawRequested` that should repaint them, implemented on Windows and X11.
+
 ### Fixed
 
 - On Windows, fix a crash occurring when trying to create a DXGI surface on a window that is both fullscreen and always on top.

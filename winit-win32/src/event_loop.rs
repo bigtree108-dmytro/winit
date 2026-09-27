@@ -1356,16 +1356,27 @@ unsafe fn public_window_callback_inner(
             // nor keep re-arming via `RDW_INTERNALPAINT` (that would spin in OLE's modal loop).
             // Let `DefWindowProcW` validate the region and show stale content for the duration of
             // the drag; the next real paint happens once `DoDragDrop` returns.
+            let invalidated = util::update_region_rects(window);
+            userdata.window_state_lock().invalidated_rects.extend(invalidated);
             result = ProcResult::Value(unsafe { DefWindowProcW(window, msg, wparam, lparam) });
         },
         WM_PAINT => {
-            userdata.window_state_lock().redraw_requested =
-                userdata.event_loop_runner.should_buffer();
+            let should_buffer = userdata.event_loop_runner.should_buffer();
+            let invalidated = util::update_region_rects(window);
+            {
+                let mut window_state = userdata.window_state_lock();
+                window_state.redraw_requested = should_buffer;
+                window_state.invalidated_rects.extend(invalidated);
+            }
 
             // We'll buffer only in response to `UpdateWindow`, if win32 decides to redraw the
             // window outside the normal flow of the event loop. This way mark event as handled
             // and request a normal redraw with `RedrawWindow`.
-            if !userdata.event_loop_runner.should_buffer() {
+            if !should_buffer {
+                let rects = mem::take(&mut userdata.window_state_lock().invalidated_rects);
+                if !rects.is_empty() {
+                    userdata.send_window_event(window, WindowEvent::SurfaceInvalidated { rects });
+                }
                 userdata.send_window_event(window, WindowEvent::RedrawRequested);
             }
 

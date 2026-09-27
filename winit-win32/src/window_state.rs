@@ -76,6 +76,10 @@ pub(crate) struct WindowState {
     // Flag whether redraw was requested.
     pub redraw_requested: bool,
 
+    // Parts of the update region validated before they could be reported; they go out with the
+    // next `RedrawRequested`.
+    pub invalidated_rects: Vec<(PhysicalPosition<u32>, PhysicalSize<u32>)>,
+
     pub dragging: bool,
 
     pub skip_taskbar: bool,
@@ -218,6 +222,7 @@ impl WindowState {
             is_active: false,
             is_focused: false,
             redraw_requested: false,
+            invalidated_rects: Vec::new(),
 
             dragging: false,
 

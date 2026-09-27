@@ -50,6 +50,8 @@ pub const MAX_MOD_REPLAY_LEN: usize = 32;
 /// The X11 documentation states: "Keycodes lie in the inclusive range `[8, 255]`".
 const KEYCODE_OFFSET: u8 = 8;
 
+type InvalidatedRects = HashMap<WindowId, Vec<(PhysicalPosition<u32>, PhysicalSize<u32>)>>;
+
 #[derive(Debug)]
 pub struct EventProcessor {
     pub ime_receiver: ImeReceiver,
@@ -78,6 +80,16 @@ pub struct EventProcessor {
     pub xfiltered_modifiers: VecDeque<u8>,
     pub xmodmap: util::ModifierKeymap,
     pub is_composing: bool,
+    // Exposed rectangles per window, sent with its next `RedrawRequested`.
+    pub invalidated: RefCell<InvalidatedRects>,
+}
+
+fn exposed_rect(xev: &XExposeEvent) -> Option<(PhysicalPosition<u32>, PhysicalSize<u32>)> {
+    let x = u32::try_from(xev.x).ok()?;
+    let y = u32::try_from(xev.y).ok()?;
+    let width = u32::try_from(xev.width).ok().filter(|&w| w > 0)?;
+    let height = u32::try_from(xev.height).ok().filter(|&h| h > 0)?;
+    Some((PhysicalPosition::new(x, y), PhysicalSize::new(width, height)))
 }
 
 impl EventProcessor {
@@ -896,6 +908,7 @@ impl EventProcessor {
         // In the event that the window's been destroyed without being dropped first, we
         // cleanup again here.
         self.target.windows.borrow_mut().remove(&WindowId::from_raw(window as _));
+        self.invalidated.borrow_mut().remove(&window_id);
 
         // Since all XIM stuff needs to happen from the same thread, we destroy the input
         // context here instead of when dropping the window.
@@ -932,11 +945,14 @@ impl EventProcessor {
     }
 
     fn expose(&self, xev: &XExposeEvent) {
+        let window_id = mkwid(xev.window as xproto::Window);
+        if let Some(rect) = exposed_rect(xev) {
+            self.invalidated.borrow_mut().entry(window_id).or_default().push(rect);
+        }
+
         // Multiple Expose events may be received for subareas of a window.
         // We issue `RedrawRequested` only for the last event of such a series.
         if xev.count == 0 {
-            let window = xev.window as xproto::Window;
-            let window_id = mkwid(window);
             self.target.redraw_sender.send(window_id);
         }
     }

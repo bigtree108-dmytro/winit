@@ -6,8 +6,12 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, mem, ptr};
 
+use dpi::{PhysicalPosition, PhysicalSize};
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND, NTSTATUS, POINT, RECT};
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, HMONITOR};
+use windows_sys::Win32::Graphics::Gdi::{
+    COMPLEXREGION, ClientToScreen, CreateRectRgn, DeleteObject, GetRegionData, GetUpdateRgn,
+    HMONITOR, HRGN, RGNDATA, SIMPLEREGION,
+};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
@@ -143,6 +147,48 @@ pub fn is_focused(window: HWND) -> bool {
 
 pub fn is_minimized(window: HWND) -> bool {
     unsafe { IsIconic(window) != false.into() }
+}
+
+/// The rectangles of the window's update region, in physical pixels of its client area.
+pub fn update_region_rects(window: HWND) -> Vec<(PhysicalPosition<u32>, PhysicalSize<u32>)> {
+    let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+    if region.is_null() {
+        return Vec::new();
+    }
+    let rects = match unsafe { GetUpdateRgn(window, region, false.into()) } {
+        SIMPLEREGION | COMPLEXREGION => region_rects(region),
+        _ => Vec::new(),
+    };
+    unsafe { DeleteObject(region) };
+    rects
+}
+
+fn region_rects(region: HRGN) -> Vec<(PhysicalPosition<u32>, PhysicalSize<u32>)> {
+    let size = unsafe { GetRegionData(region, 0, ptr::null_mut()) };
+    if size == 0 {
+        return Vec::new();
+    }
+    // `u32` elements keep the `RGNDATA` header and the `RECT`s after it aligned.
+    let mut buffer = vec![0u32; (size as usize).div_ceil(mem::size_of::<u32>())];
+    let data = buffer.as_mut_ptr().cast::<RGNDATA>();
+    if unsafe { GetRegionData(region, size, data) } == 0 {
+        return Vec::new();
+    }
+    let rects = unsafe {
+        std::slice::from_raw_parts(
+            (&raw const (*data).Buffer).cast::<RECT>(),
+            (*data).rdh.nCount as usize,
+        )
+    };
+    rects.iter().filter_map(physical_rect).collect()
+}
+
+fn physical_rect(rect: &RECT) -> Option<(PhysicalPosition<u32>, PhysicalSize<u32>)> {
+    let left = rect.left.max(0);
+    let top = rect.top.max(0);
+    let width = u32::try_from(rect.right.saturating_sub(left)).ok().filter(|&w| w > 0)?;
+    let height = u32::try_from(rect.bottom.saturating_sub(top)).ok().filter(|&h| h > 0)?;
+    Some((PhysicalPosition::new(left as u32, top as u32), PhysicalSize::new(width, height)))
 }
 
 pub fn get_instance_handle() -> HMODULE {
@@ -364,4 +410,97 @@ pub(crate) unsafe fn set_window_long(
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowLongW(hwnd, nindex, dwnewlong as i32)
             as isize
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::Graphics::Gdi::{CombineRgn, RGN_OR};
+
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    fn parts(rect: (PhysicalPosition<u32>, PhysicalSize<u32>)) -> (u32, u32, u32, u32) {
+        let (position, size) = rect;
+        (position.x, position.y, size.width, size.height)
+    }
+
+    fn region_of(rects: &[RECT]) -> HRGN {
+        let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        for r in rects {
+            let part = unsafe { CreateRectRgn(r.left, r.top, r.right, r.bottom) };
+            unsafe { CombineRgn(region, region, part, RGN_OR) };
+            unsafe { DeleteObject(part) };
+        }
+        region
+    }
+
+    fn rects_of(rects: &[RECT]) -> Vec<(u32, u32, u32, u32)> {
+        let region = region_of(rects);
+        let result = region_rects(region).into_iter().map(parts).collect();
+        unsafe { DeleteObject(region) };
+        result
+    }
+
+    #[test]
+    fn physical_rect_keeps_a_rect_in_the_client_area() {
+        assert_eq!(physical_rect(&rect(10, 20, 110, 70)).map(parts), Some((10, 20, 100, 50)));
+        assert_eq!(physical_rect(&rect(0, 0, 1, 1)).map(parts), Some((0, 0, 1, 1)));
+    }
+
+    #[test]
+    fn physical_rect_clamps_negative_edges_to_the_client_area() {
+        assert_eq!(physical_rect(&rect(-10, -20, 30, 40)).map(parts), Some((0, 0, 30, 40)));
+    }
+
+    #[test]
+    fn physical_rect_drops_empty_inverted_and_outside_rects() {
+        assert_eq!(physical_rect(&rect(10, 10, 10, 50)), None);
+        assert_eq!(physical_rect(&rect(10, 10, 50, 10)), None);
+        assert_eq!(physical_rect(&rect(50, 50, 10, 10)), None);
+        assert_eq!(physical_rect(&rect(-30, 0, -10, 10)), None);
+        assert_eq!(physical_rect(&rect(0, -30, 10, -10)), None);
+    }
+
+    #[test]
+    fn physical_rect_does_not_overflow_on_extreme_coordinates() {
+        assert_eq!(
+            physical_rect(&rect(i32::MIN, i32::MIN, i32::MAX, i32::MAX)).map(parts),
+            Some((0, 0, i32::MAX as u32, i32::MAX as u32))
+        );
+        assert_eq!(physical_rect(&rect(i32::MAX, i32::MAX, i32::MIN, i32::MIN)), None);
+    }
+
+    #[test]
+    fn region_rects_of_an_empty_region_is_empty() {
+        assert_eq!(rects_of(&[]), Vec::new());
+    }
+
+    #[test]
+    fn region_rects_of_a_single_rect_is_that_rect() {
+        assert_eq!(rects_of(&[rect(0, 0, 800, 600)]), vec![(0, 0, 800, 600)]);
+    }
+
+    #[test]
+    fn region_rects_keeps_disjoint_rects_apart() {
+        let mut rects = rects_of(&[rect(0, 0, 10, 10), rect(100, 100, 120, 130)]);
+        rects.sort();
+        assert_eq!(rects, vec![(0, 0, 10, 10), (100, 100, 20, 30)]);
+    }
+
+    #[test]
+    fn region_rects_of_overlapping_rects_cover_the_union_exactly_once() {
+        let rects = rects_of(&[rect(0, 0, 10, 10), rect(5, 5, 15, 15)]);
+        let area: u32 = rects.iter().map(|&(_, _, w, h)| w * h).sum();
+        assert_eq!(area, 100 + 100 - 25);
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                let overlap_x = a.0 < b.0 + b.2 && b.0 < a.0 + a.2;
+                let overlap_y = a.1 < b.1 + b.3 && b.1 < a.1 + a.3;
+                assert!(!(overlap_x && overlap_y), "{a:?} overlaps {b:?}");
+            }
+        }
+    }
 }

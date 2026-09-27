@@ -522,8 +522,32 @@ pub enum WindowEvent {
     /// Winit will aggregate duplicate redraw requests into a single event, to
     /// help avoid duplicating rendering work.
     ///
+    /// When the system discarded part of what the window shows, a
+    /// [`WindowEvent::SurfaceInvalidated`] event naming those parts is emitted right before this
+    /// one.
+    ///
     /// [the safe area]: crate::window::Window::safe_area
     RedrawRequested,
+
+    /// Parts of the surface whose presented contents the system discarded.
+    ///
+    /// Emitted right before the [`WindowEvent::RedrawRequested`] it belongs to. An application that
+    /// repaints only what changed in its own state should repaint and present these areas too,
+    /// even if nothing else changed; otherwise they keep whatever the system left there.
+    ///
+    /// Each rectangle is a position and a size in physical pixels, relative to the top-left of
+    /// the surface. Together they may cover more than what was actually lost. When this event
+    /// isn't emitted before a redraw, the system has not discarded anything, and repainting what
+    /// the application itself changed is enough.
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Windows:** The window's update region, for example after the window was restored from
+    ///   minimized, resized, or moved back from off screen.
+    /// - **X11:** The rectangles of the `Expose` events received since the last redraw.
+    /// - **Wayland / Web / Orbital:** Never emitted, the window's contents are kept by the system.
+    /// - **Android / macOS / iOS:** Unsupported.
+    SurfaceInvalidated { rects: Vec<(PhysicalPosition<u32>, PhysicalSize<u32>)> },
 }
 
 /// Represents the kind type of a pointer event.
