@@ -2250,15 +2250,15 @@ unsafe fn public_window_callback_inner(
             // and remove them from the outer size.
             let margin_left: i32;
             let margin_top: i32;
-            // let margin_right: i32;
-            // let margin_bottom: i32;
+            let margin_right: i32;
+            let margin_bottom: i32;
             {
                 let adjusted_rect =
                     window_flags.adjust_rect(window, suggested_rect).unwrap_or(suggested_rect);
                 margin_left = suggested_rect.left - adjusted_rect.left;
                 margin_top = suggested_rect.top - adjusted_rect.top;
-                // margin_right = adjusted_rect.right - suggested_rect.right;
-                // margin_bottom = adjusted_rect.bottom - suggested_rect.bottom;
+                margin_right = adjusted_rect.right - suggested_rect.right;
+                margin_bottom = adjusted_rect.bottom - suggested_rect.bottom;
             }
 
             let old_physical_inner_rect = util::WindowArea::Inner
@@ -2269,9 +2269,19 @@ unsafe fn public_window_callback_inner(
                 (old_physical_inner_rect.bottom - old_physical_inner_rect.top) as u32,
             );
 
+            let apply_win10_adjustment = WIN10_BUILD_VERSION.is_some_and(|version| version < 22000);
+
             // `allow_resize` prevents us from re-applying DPI adjustment to the restored size after
             // exiting fullscreen (the restored size is already DPI adjusted).
-            let new_physical_inner_size = match allow_resize {
+            let suggested_physical_inner_size = match allow_resize {
+                // On Windows 11 the suggested rect already fits the new monitor, snap layouts
+                // included, so its inner size is the default the application may override.
+                true if !apply_win10_adjustment => PhysicalSize::new(
+                    (suggested_rect.right - suggested_rect.left - margin_left - margin_right).max(0)
+                        as u32,
+                    (suggested_rect.bottom - suggested_rect.top - margin_top - margin_bottom).max(0)
+                        as u32,
+                ),
                 // We calculate our own size because the default suggested rect doesn't do a great
                 // job of preserving the window's logical size.
                 true => old_physical_inner_size
@@ -2280,7 +2290,7 @@ unsafe fn public_window_callback_inner(
                 false => old_physical_inner_size,
             };
 
-            let new_inner_size = Arc::new(Mutex::new(new_physical_inner_size));
+            let new_inner_size = Arc::new(Mutex::new(suggested_physical_inner_size));
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
                 event: ScaleFactorChanged {
@@ -2306,8 +2316,7 @@ unsafe fn public_window_callback_inner(
                 }
             }
 
-            let new_outer_rect: RECT = if WIN10_BUILD_VERSION.is_some_and(|version| version < 22000)
-            {
+            let new_outer_rect: RECT = if apply_win10_adjustment {
                 // Apply Windows 10-specific DPI adjustment workaround
                 apply_win10_dpi_adjustment(
                     window,
@@ -2318,9 +2327,20 @@ unsafe fn public_window_callback_inner(
                     window_flags,
                     dragging_window,
                 )
-            } else {
+            } else if new_physical_inner_size == suggested_physical_inner_size {
                 // The suggested position is fine w/o adjustment on Windows 11+
                 suggested_rect
+            } else {
+                // The application requested its own size, so apply it at the suggested position.
+                let left = suggested_rect.left + margin_left;
+                let top = suggested_rect.top + margin_top;
+                let inner_rect = RECT {
+                    left,
+                    top,
+                    right: left + new_physical_inner_size.width as i32,
+                    bottom: top + new_physical_inner_size.height as i32,
+                };
+                window_flags.adjust_rect(window, inner_rect).unwrap_or(inner_rect)
             };
 
             unsafe {
